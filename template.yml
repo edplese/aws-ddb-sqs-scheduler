@@ -1,0 +1,99 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Parameters: 
+  PartitionCount: 
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 16
+    Description: Number of schedule partitions to use
+
+Resources:
+  OutQueue:
+    Type: AWS::SQS::Queue
+
+  DynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties: 
+      AttributeDefinitions: 
+        - AttributeName: p
+          AttributeType: S
+        - AttributeName: s
+          AttributeType: S
+      KeySchema: 
+        - AttributeName: p
+          KeyType: HASH
+        - AttributeName: s
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+
+  ScheduleLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./schedule.py
+      Handler: schedule.lambda_handler
+      Runtime: python3.7
+      Timeout: 3
+      MemorySize: 512
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DynamoDBTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt OutQueue.QueueName
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref DynamoDBTable
+          QUEUE_URL: !Ref OutQueue
+          PARTITION_COUNT: !Ref PartitionCount
+  
+  TriggerLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./trigger.py
+      Handler: trigger.lambda_handler
+      Runtime: python3.7
+      Timeout: 10
+      MemorySize: 256
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref FeedLambda
+      Environment:
+        Variables:
+          PARTITION_COUNT: !Ref PartitionCount
+          FUNCTION_NAME: !Ref FeedLambda
+      Events:
+        ScheduledTriggerEvent:
+          Type: Schedule
+          Properties:
+            Schedule: rate(10 minutes)
+
+  FeedLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./feed.py
+      Handler: feed.lambda_handler
+      Runtime: python3.7
+      Timeout: 540
+      MemorySize: 512
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DynamoDBTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt OutQueue.QueueName
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref DynamoDBTable
+          QUEUE_URL: !Ref OutQueue
+
+Outputs:
+  RequestLambda:
+    Description: Lambda function used to schedule an event
+    Value: !Ref ScheduleLambda
+    Export:
+      Name: !Join [ ":", [ !Ref "AWS::StackName", ScheduleLambda ] ]
+  OutputQueue:
+    Description: Output SQS queue with the scheduled events
+    Value: !Ref OutQueue
+    Export:
+      Name: !Join [ ":", [ !Ref "AWS::StackName", OutQueue ] ]
